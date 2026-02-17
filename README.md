@@ -6,6 +6,8 @@ An online tool for maps with way too many broken junctions to fix manually. Drop
 
 **👉 [Use the online tool](https://Wilhelm-af.github.io/StarRupture-JunctionFixer/)**
 
+In need of other usefull tools check out this site: [StarRupture Utilities](https://starrupture-utilities.com/)
+
 ---
 
 ## The Problem
