@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StarRupture Junction Fix</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface2: #1a1a26;
+    --border: #2a2a3a;
+    --text: #e0e0ec;
+    --text-dim: #7a7a90;
+    --accent: #f59e0b;
+    --accent-dim: #92610d;
+    --success: #22c55e;
+    --error: #ef4444;
+    --warning: #f59e0b;
+    --font-body: 'Outfit', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ─── Subtle grid bg ─── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(245, 158, 11, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(245, 158, 11, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 60px 24px 80px;
+  }
+
+  /* ─── Header ─── */
+  .header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  .header-badge {
+    display: inline-block;
+    padding: 6px 14px;
+    border: 1px solid var(--accent-dim);
+    border-radius: 100px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 20px;
+    background: rgba(245, 158, 11, 0.06);
+  }
+
+  h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    margin-bottom: 12px;
+  }
+
+  h1 .highlight {
+    color: var(--accent);
+  }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 16px;
+    font-weight: 300;
+    line-height: 1.6;
+    max-width: 520px;
+    margin: 0 auto;
+  }
+
+  /* ─── Drop Zone ─── */
+  .dropzone {
+    position: relative;
+    border: 2px dashed var(--border);
+    border-radius: 16px;
+    padding: 56px 32px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    background: var(--surface);
+    margin-bottom: 32px;
+  }
+
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--accent);
+    background: rgba(245, 158, 11, 0.04);
+  }
+
+  .dropzone.dragover {
+    transform: scale(1.01);
+  }
+
+  .dropzone-icon {
+    width: 56px;
+    height: 56px;
+    margin: 0 auto 16px;
+    border-radius: 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+  }
+
+  .dropzone-text {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .dropzone-hint {
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  .dropzone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  /* ─── File loaded state ─── */
+  .file-info {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 24px;
+    gap: 16px;
+    align-items: center;
+  }
+
+  .file-info.visible {
+    display: flex;
+  }
+
+  .file-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid var(--accent-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  .file-details {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .file-name {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .file-size {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
+  .file-remove {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all 0.15s;
+  }
+
+  .file-remove:hover {
+    border-color: var(--error);
+    color: var(--error);
+  }
+
+  /* ─── Action Button ─── */
+  .actions {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+
+  .btn {
+    flex: 1;
+    padding: 16px 32px;
+    border-radius: 12px;
+    font-family: var(--font-body);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #000;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: #fbbf24;
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(245, 158, 11, 0.25);
+  }
+
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    border-color: var(--accent-dim);
+    background: var(--surface);
+  }
+
+  .btn-download {
+    background: var(--success);
+    color: #000;
+  }
+
+  .btn-download:hover:not(:disabled) {
+    background: #4ade80;
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(34, 197, 94, 0.25);
+  }
+
+  /* ─── Log ─── */
+  .log-container {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+
+  .log-container.visible {
+    display: block;
+  }
+
+  .log-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .log-status {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 8px;
+  }
+
+  .log-status.running { background: var(--accent); animation: pulse 1s infinite; }
+  .log-status.done { background: var(--success); }
+  .log-status.error { background: var(--error); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .log-body {
+    padding: 16px 20px;
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-dim);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .log-body::-webkit-scrollbar { width: 6px; }
+  .log-body::-webkit-scrollbar-track { background: transparent; }
+  .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .log-line { white-space: pre-wrap; word-break: break-all; }
+  .log-line.info { color: var(--text); }
+  .log-line.success { color: var(--success); }
+  .log-line.warn { color: var(--warning); }
+  .log-line.error { color: var(--error); }
+  .log-line.header { color: var(--accent); font-weight: 700; }
+
+  /* ─── Results ─── */
+  .results {
+    display: none;
+    margin-bottom: 24px;
+  }
+
+  .results.visible {
+    display: block;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .stat-value {
+    font-size: 28px;
+    font-weight: 800;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    line-height: 1;
+  }
+
+  .stat-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 6px;
+  }
+
+  /* ─── How it works ─── */
+  .info-section {
+    margin-top: 56px;
+    padding-top: 40px;
+    border-top: 1px solid var(--border);
+  }
+
+  .info-section h2 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.02em;
+  }
+
+  .info-cards {
+    display: grid;
+    gap: 12px;
+  }
+
+  .info-card {
+    display: flex;
+    gap: 16px;
+    padding: 18px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  .info-card-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid var(--accent-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .info-card-text {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+
+  .info-card-text strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* ─── Footer ─── */
+  .footer {
+    margin-top: 56px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.8;
+  }
+
+  .footer a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-badge">Client-side · No upload · Your save stays local</div>
+    <h1>StarRupture <span class="highlight">Junction Fix</span></h1>
+    <p class="subtitle">
+      Fixes the drone junction save/load bug where all drones collapse to the center lane.
+      Works on any number of 3-way and 5-way junctions.
+    </p>
+  </div>
+
+  <!-- Drop Zone -->
+  <div class="dropzone" id="dropzone">
+    <div class="dropzone-icon">📂</div>
+    <div class="dropzone-text">Drop your save file here</div>
+    <div class="dropzone-hint">or click to browse · accepts .sav files</div>
+    <input type="file" id="fileInput" accept=".sav">
+  </div>
+
+  <!-- File Info -->
+  <div class="file-info" id="fileInfo">
+    <div class="file-icon">💾</div>
+    <div class="file-details">
+      <div class="file-name" id="fileName"></div>
+      <div class="file-size" id="fileSize"></div>
+    </div>
+    <button class="file-remove" id="fileRemove">Remove</button>
+  </div>
+
+  <!-- Actions -->
+  <div class="actions">
+    <button class="btn btn-secondary" id="btnDryRun" disabled>Dry Run</button>
+    <button class="btn btn-primary" id="btnApply" disabled>Fix & Download</button>
+  </div>
+
+  <!-- Results -->
+  <div class="results" id="results">
+    <div class="stats-grid" id="statsGrid"></div>
+    <button class="btn btn-download" id="btnDownload" style="width:100%; display:none;">
+      ⬇ Download Fixed Save
+    </button>
+  </div>
+
+  <!-- Log -->
+  <div class="log-container" id="logContainer">
+    <div class="log-header">
+      <span><span class="log-status" id="logStatus"></span>Output</span>
+    </div>
+    <div class="log-body" id="logBody"></div>
+  </div>
+
+  <!-- How it works -->
+  <div class="info-section">
+    <h2>How it works</h2>
+    <div class="info-cards">
+      <div class="info-card">
+        <div class="info-card-num">1</div>
+        <div class="info-card-text">
+          <strong>The bug:</strong> Junctions lose their socket-to-pole mapping on save/load because
+          <code>FCrLogisticsSocketsFragment</code> isn't savable. All drones collapse to the center lane.
+        </div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-num">2</div>
+        <div class="info-card-text">
+          <strong>The fix:</strong> Rewrites spline endpoints so each lane connects through a dedicated
+          invisible pole instead of sharing the junction entity. The game's loader can't collapse them.
+        </div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-num">3</div>
+        <div class="info-card-text">
+          <strong>Safe:</strong> Creates a backup, removes stale poles and drones (they respawn), and
+          everything runs in your browser — your save file is never uploaded anywhere.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Made by Wilhelm-af - Built for the StarRupture community<br>
+    <a href="https://github.com/Wilhelm-af/StarRupture-JunctionFixer" target="_blank">Source on GitHub</a>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// StarRupture Junction Fix — Browser Port (v5 algorithm)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const $ = id => document.getElementById(id);
+
+let loadedFile = null;
+let fixedBlob = null;
+let originalFileName = '';
+
+// ─── UI Wiring ──────────────────────────────────────────────────────────
+
+const dropzone = $('dropzone');
+const fileInput = $('fileInput');
+const fileInfo = $('fileInfo');
+const btnDryRun = $('btnDryRun');
+const btnApply = $('btnApply');
+const logContainer = $('logContainer');
+const logBody = $('logBody');
+const logStatus = $('logStatus');
+const results = $('results');
+const statsGrid = $('statsGrid');
+const btnDownload = $('btnDownload');
+
+dropzone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropzone.classList.add('dragover');
+});
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length) handleFile(e.target.files[0]);
+});
+$('fileRemove').addEventListener('click', resetFile);
+btnDryRun.addEventListener('click', () => runFix(false));
+btnApply.addEventListener('click', () => runFix(true));
+btnDownload.addEventListener('click', downloadFixed);
+
+function handleFile(file) {
+  if (!file.name.endsWith('.sav')) {
+    alert('Please select a .sav file');
+    return;
+  }
+  loadedFile = file;
+  originalFileName = file.name;
+  $('fileName').textContent = file.name;
+  $('fileSize').textContent = formatBytes(file.size);
+  fileInfo.classList.add('visible');
+  dropzone.style.display = 'none';
+  btnDryRun.disabled = false;
+  btnApply.disabled = false;
+  resetResults();
+}
+
+function resetFile() {
+  loadedFile = null;
+  fixedBlob = null;
+  fileInfo.classList.remove('visible');
+  dropzone.style.display = '';
+  btnDryRun.disabled = true;
+  btnApply.disabled = true;
+  fileInput.value = '';
+  resetResults();
+}
+
+function resetResults() {
+  logContainer.classList.remove('visible');
+  results.classList.remove('visible');
+  btnDownload.style.display = 'none';
+  logBody.innerHTML = '';
+  statsGrid.innerHTML = '';
+}
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+// ─── Logging ────────────────────────────────────────────────────────────
+
+function clearLog() {
+  logBody.innerHTML = '';
+  logContainer.classList.add('visible');
+  logStatus.className = 'log-status running';
+}
+
+function log(msg, cls = '') {
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = msg;
+  logBody.appendChild(line);
+  logBody.scrollTop = logBody.scrollHeight;
+}
+
+function showStats(stats) {
+  results.classList.add('visible');
+  statsGrid.innerHTML = '';
+  for (const [label, value] of stats) {
+    const el = document.createElement('div');
+    el.className = 'stat';
+    el.innerHTML = `<div class="stat-value">${value}</div><div class="stat-label">${label}</div>`;
+    statsGrid.appendChild(el);
+  }
+}
+
+// ─── Save File I/O ──────────────────────────────────────────────────────
+
+function readSav(buffer) {
+  const raw = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const uncompressedSize = view.getUint32(0, true);
+  const compressed = raw.slice(4);
+  const jsonBytes = pako.inflate(compressed);
+  const jsonStr = new TextDecoder().decode(jsonBytes);
+  log(`Read: ${formatBytes(raw.length)} compressed, ${formatBytes(jsonBytes.length)} decompressed`);
+  return JSON.parse(jsonStr);
+}
+
+function writeSav(data) {
+  const jsonStr = JSON.stringify(data);
+  const jsonBytes = new TextEncoder().encode(jsonStr);
+  const compressed = pako.deflate(jsonBytes);
+  const output = new Uint8Array(4 + compressed.length);
+  const view = new DataView(output.buffer);
+  view.setUint32(0, jsonBytes.length, true);
+  output.set(compressed, 4);
+  log(`Written: ${formatBytes(output.length)} compressed`);
+  return output;
+}
+
+// ─── Fix Algorithm (v5 port) ────────────────────────────────────────────
+
+function extractId(key) {
+  const m = key.match(/\(ID=(\d+)\)/);
+  return m ? parseInt(m[1]) : null;
+}
+
+function findEntityContainer(data) {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const keys = Object.keys(data);
+    if (keys.length > 100 && keys.some(k => /^\(ID=\d+\)$/.test(k))) {
+      return data;
+    }
+    for (const v of Object.values(data)) {
+      const r = findEntityContainer(v);
+      if (r) return r;
+    }
+  } else if (Array.isArray(data)) {
+    for (const v of data) {
+      const r = findEntityContainer(v);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+function getConfig(entity) {
+  return entity?.spawnData?.entityConfigDataPath || '';
+}
+
+function getSplineData(entity) {
+  const frags = entity?.fragmentValues;
+  if (!Array.isArray(frags)) return null;
+  for (const frag of frags) {
+    if (typeof frag !== 'string' || !frag.includes('AuSplineConnectionFragment')) continue;
+    const s = frag.match(/StartEntity=\(ID=(\d+)\)/);
+    const e = frag.match(/EndEntity=\(ID=(\d+)\)/);
+    if (!s || !e) continue;
+    const positions = [...frag.matchAll(/Position=\(X=([\-\d.]+),Y=([\-\d.]+)/g)]
+      .map(m => [parseFloat(m[1]), parseFloat(m[2])]);
+    return {
+      startId: parseInt(s[1]),
+      endId: parseInt(e[1]),
+      startPos: positions[0] || null,
+      endPos: positions[positions.length - 1] || null,
+    };
+  }
+  return null;
+}
+
+function rewriteSplineField(entity, oldId, newId, field) {
+  const frags = entity?.fragmentValues;
+  if (!Array.isArray(frags)) return false;
+  for (let i = 0; i < frags.length; i++) {
+    if (typeof frags[i] !== 'string' || !frags[i].includes('AuSplineConnectionFragment')) continue;
+    const pattern = new RegExp(`${field}Entity=\\(ID=${oldId}\\)`);
+    const replacement = `${field}Entity=(ID=${newId})`;
+    const newFrag = frags[i].replace(pattern, replacement);
+    if (newFrag !== frags[i]) {
+      frags[i] = newFrag;
+      return true;
+    }
+  }
+  return false;
+}
+
+function makePoleEntity() {
+  return {
+    spawnData: {
+      entityConfigDataPath: "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole",
+      transform: {
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        translation: { x: 0, y: 0, z: 0 },
+        scale3D: { x: 1, y: 1, z: 1 }
+      }
+    },
+    tags: [],
+    fragmentValues: [
+      "/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)"
+    ]
+  };
+}
+
+function detectLaneAxis(positions) {
+  if (positions.length < 2) return 'x';
+  const xs = positions.map(p => p[0]);
+  const ys = positions.map(p => p[1]);
+  const xSpread = Math.max(...xs) - Math.min(...xs);
+  const ySpread = Math.max(...ys) - Math.min(...ys);
+  return xSpread > ySpread ? 'x' : 'y';
+}
+
+function clusterByValue(items, tolerance = 15.0) {
+  if (!items.length) return [];
+  items.sort((a, b) => a[0] - b[0]);
+  const clusters = [[items[0]]];
+  for (let i = 1; i < items.length; i++) {
+    if (Math.abs(items[i][0] - items[i - 1][0]) <= tolerance) {
+      clusters[clusters.length - 1].push(items[i]);
+    } else {
+      clusters.push([items[i]]);
+    }
+  }
+  return clusters;
+}
+
+function runFixAlgorithm(data, apply) {
+  const entities = findEntityContainer(data);
+  if (!entities) {
+    log('ERROR: No entity container found', 'error');
+    return null;
+  }
+
+  // ── Discovery ──
+  const junctionIds = {};
+  const splines = [];
+  const poleKeys = [];
+  const droneKeys = [];
+
+  for (const [key, value] of Object.entries(entities)) {
+    const eid = extractId(key);
+    if (eid === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    const config = getConfig(value);
+
+    if (config.includes('DroneLane_3')) junctionIds[eid] = '3-way';
+    else if (config.includes('DroneLane_5')) junctionIds[eid] = '5-way';
+    if (config.includes('DroneInvisiblePole')) poleKeys.push(key);
+    if (config.includes('RailDroneConfig')) droneKeys.push(key);
+
+    const sd = getSplineData(value);
+    if (sd) {
+      sd.id = eid;
+      sd.key = key;
+      sd.entity = value;
+      splines.push(sd);
+    }
+  }
+
+  const junctionSet = new Set(Object.keys(junctionIds).map(Number));
+
+  log(`Junctions: ${Object.keys(junctionIds).length}`, 'info');
+  log(`Splines: ${splines.length}`, 'info');
+  log(`Old poles: ${poleKeys.length}`, 'info');
+  log(`Drones: ${droneKeys.length}`, 'info');
+
+  // ── Per-junction spline index ──
+  const junctionTouches = {};
+
+  for (const sp of splines) {
+    if (junctionSet.has(sp.startId)) {
+      if (!junctionTouches[sp.startId]) junctionTouches[sp.startId] = [];
+      junctionTouches[sp.startId].push({
+        spline: sp, field: 'Start', neighbor: sp.endId, pos: sp.startPos
+      });
+    }
+    if (junctionSet.has(sp.endId)) {
+      if (!junctionTouches[sp.endId]) junctionTouches[sp.endId] = [];
+      junctionTouches[sp.endId].push({
+        spline: sp, field: 'End', neighbor: sp.startId, pos: sp.endPos
+      });
+    }
+  }
+
+  // ── Process each junction ──
+  let maxId = 0;
+  for (const key of Object.keys(entities)) {
+    const eid = extractId(key);
+    if (eid && eid < 4294967295) maxId = Math.max(maxId, eid);
+  }
+  let nextId = maxId + 1;
+
+  const newPoles = {};
+  const allChanges = [];
+  let junctionsFixed = 0;
+  let junctionsSkipped = 0;
+
+  const sortedJids = Object.keys(junctionIds).map(Number).sort((a, b) => a - b);
+
+  for (const jid of sortedJids) {
+    const touches = junctionTouches[jid] || [];
+    if (touches.length < 2) { junctionsSkipped++; continue; }
+
+    // Group by neighbor
+    const byNeighbor = {};
+    for (const t of touches) {
+      if (!byNeighbor[t.neighbor]) byNeighbor[t.neighbor] = [];
+      byNeighbor[t.neighbor].push(t);
+    }
+
+    // Find lane axis from a multi-spline neighbor group
+    let laneAxis = null;
+    for (const group of Object.values(byNeighbor)) {
+      if (group.length >= 2) {
+        const positions = group.map(t => t.pos).filter(Boolean);
+        if (positions.length >= 2) {
+          laneAxis = detectLaneAxis(positions);
+          break;
+        }
+      }
+    }
+
+    if (!laneAxis) { junctionsSkipped++; continue; }
+
+    // Cluster all touches by lane axis
+    const laneItems = [];
+    for (const t of touches) {
+      if (t.pos) {
+        const val = laneAxis === 'x' ? t.pos[0] : t.pos[1];
+        laneItems.push([val, t]);
+      }
+    }
+
+    const clusters = clusterByValue(laneItems, 15.0);
+    if (clusters.length <= 1) { junctionsSkipped++; continue; }
+
+    // One pole per lane
+    for (const cluster of clusters) {
+      const poleId = nextId++;
+      newPoles[poleId] = makePoleEntity();
+
+      for (const [val, touch] of cluster) {
+        allChanges.push({
+          entity: touch.spline.entity,
+          field: touch.field,
+          junctionId: jid,
+          poleId: poleId,
+          splineId: touch.spline.id,
+        });
+      }
+    }
+    junctionsFixed++;
+  }
+
+  // ── Summary ──
+  log('');
+  log('═══════════════════════════════════════', 'header');
+  log('  SUMMARY', 'header');
+  log('═══════════════════════════════════════', 'header');
+  log(`  Junctions fixed: ${junctionsFixed}`, 'info');
+  log(`  Junctions skipped: ${junctionsSkipped}`, 'info');
+  log(`  Spline rewrites: ${allChanges.length}`, 'info');
+  log(`  New poles: ${Object.keys(newPoles).length}`, 'info');
+  log(`  Old poles to remove: ${poleKeys.length}`, 'info');
+  log(`  Drones to remove: ${droneKeys.length}`, 'info');
+
+  const stats = [
+    ['Junctions Fixed', junctionsFixed],
+    ['Spline Rewrites', allChanges.length],
+    ['New Poles', Object.keys(newPoles).length],
+    ['Drones Cleared', droneKeys.length],
+  ];
+
+  if (!apply) {
+    log('\n  DRY RUN complete. Click "Fix & Download" to apply.', 'warn');
+    return { stats, applied: false };
+  }
+
+  // ── Apply ──
+  log('\n  Applying...', 'info');
+
+  // Create poles
+  for (const [poleId, poleEntity] of Object.entries(newPoles)) {
+    entities[`(ID=${poleId})`] = poleEntity;
+  }
+  log(`  ✓ Created ${Object.keys(newPoles).length} poles`, 'success');
+
+  // Rewrite splines (dedup)
+  const done = new Set();
+  let okCount = 0, failCount = 0;
+  for (const ch of allChanges) {
+    const key = `${ch.splineId}:${ch.field}`;
+    if (done.has(key)) continue;
+    done.add(key);
+    if (rewriteSplineField(ch.entity, ch.junctionId, ch.poleId, ch.field)) {
+      okCount++;
+    } else {
+      failCount++;
+      log(`  ✗ FAILED: Spline ${ch.splineId} ${ch.field} ${ch.junctionId}→${ch.poleId}`, 'error');
+    }
+  }
+  log(`  ✓ Rewrote ${okCount} endpoints (${failCount} failed)`, 'success');
+
+  // Remove old poles
+  let removedPoles = 0;
+  for (const key of poleKeys) {
+    if (entities[key] !== undefined) { delete entities[key]; removedPoles++; }
+  }
+  log(`  ✓ Removed ${removedPoles} old poles`, 'success');
+
+  // Remove drones
+  for (const key of droneKeys) {
+    if (entities[key] !== undefined) delete entities[key];
+  }
+  log(`  ✓ Removed ${droneKeys.length} drones`, 'success');
+
+  return { stats, applied: true, data };
+}
+
+// ─── Run ────────────────────────────────────────────────────────────────
+
+async function runFix(apply) {
+  if (!loadedFile) return;
+
+  clearLog();
+  resetResults();
+  btnDryRun.disabled = true;
+  btnApply.disabled = true;
+  fixedBlob = null;
+
+  try {
+    log(apply ? 'Applying fix...' : 'Running dry run...', 'header');
+    log('');
+
+    const buffer = await loadedFile.arrayBuffer();
+    const data = readSav(buffer);
+
+    // Run in a setTimeout to let the UI update
+    await new Promise(r => setTimeout(r, 50));
+
+    const result = runFixAlgorithm(data, apply);
+
+    if (!result) {
+      logStatus.className = 'log-status error';
+      return;
+    }
+
+    showStats(result.stats);
+    logStatus.className = 'log-status done';
+
+    if (result.applied) {
+      log('\n  Writing fixed save...', 'info');
+      const output = writeSav(result.data);
+      fixedBlob = new Blob([output], { type: 'application/octet-stream' });
+      log('\n  ✓ Fix applied! Click download below.', 'success');
+      btnDownload.style.display = 'block';
+    }
+  } catch (err) {
+    log(`\nERROR: ${err.message}`, 'error');
+    log(err.stack, 'error');
+    logStatus.className = 'log-status error';
+  }
+
+  btnDryRun.disabled = false;
+  btnApply.disabled = false;
+}
+
+function downloadFixed() {
+  if (!fixedBlob) return;
+  const url = URL.createObjectURL(fixedBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = originalFileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+</script>
+
+</body>
+</html>
