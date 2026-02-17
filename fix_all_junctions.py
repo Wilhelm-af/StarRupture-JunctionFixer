@@ -27,7 +27,7 @@ def read_sav(path):
 
 
 def write_sav(path, data):
-    json_bytes = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     compressed = zlib.compress(json_bytes)
     with open(path, "wb") as f:
         f.write(struct.pack("<I", len(json_bytes)))
@@ -156,6 +156,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fix ALL junctions (universal v5)")
     parser.add_argument("save_file")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--json", action="store_true", help="Also write a .sav.json file")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -307,63 +308,68 @@ def main():
 
     if not args.apply:
         print(f"\n  DRY RUN. Use --apply to modify the save.")
-        return
+    else:
+        # ── Apply ──
+        print(f"\n  Applying...")
 
-    # ── Apply ──
-    print(f"\n  Applying...")
+        # Create new poles
+        for pole_id, pole_entity in new_poles.items():
+            entities[f"(ID={pole_id})"] = pole_entity
+        print(f"    ✓ Created {len(new_poles)} poles")
 
-    # Create new poles
-    for pole_id, pole_entity in new_poles.items():
-        entities[f"(ID={pole_id})"] = pole_entity
-    print(f"    ✓ Created {len(new_poles)} poles")
+        # Rewrite splines (track to avoid duplicates)
+        done = set()
+        ok_count = 0
+        skip_count = 0
+        fail_count = 0
+        for sp_entity, field, jid, pole_id, sp_eid in all_changes:
+            key = (sp_eid, field)
+            if key in done:
+                skip_count += 1
+                continue
+            done.add(key)
 
-    # Rewrite splines (track to avoid duplicates)
-    done = set()
-    ok_count = 0
-    skip_count = 0
-    fail_count = 0
-    for sp_entity, field, jid, pole_id, sp_eid in all_changes:
-        key = (sp_eid, field)
-        if key in done:
-            skip_count += 1
-            continue
-        done.add(key)
+            if rewrite_spline_field(sp_entity, jid, pole_id, field):
+                ok_count += 1
+            else:
+                fail_count += 1
+                if args.verbose:
+                    print(f"    ✗ FAILED: Spline {sp_eid}: {field} {jid}→{pole_id}")
+        print(f"    ✓ Rewrote {ok_count} endpoints ({skip_count} skipped, {fail_count} failed)")
 
-        if rewrite_spline_field(sp_entity, jid, pole_id, field):
-            ok_count += 1
-        else:
-            fail_count += 1
-            if args.verbose:
-                print(f"    ✗ FAILED: Spline {sp_eid}: {field} {jid}→{pole_id}")
-    print(f"    ✓ Rewrote {ok_count} endpoints ({skip_count} skipped, {fail_count} failed)")
+        # Remove old poles
+        removed = 0
+        for key in pole_keys:
+            if key in entities:
+                del entities[key]
+                removed += 1
+        print(f"    ✓ Removed {removed} old poles")
 
-    # Remove old poles
-    removed = 0
-    for key in pole_keys:
-        if key in entities:
-            del entities[key]
-            removed += 1
-    print(f"    ✓ Removed {removed} old poles")
+        # Remove drones
+        for key in drone_keys:
+            if key in entities:
+                del entities[key]
+        print(f"    ✓ Removed {len(drone_keys)} drones")
 
-    # Remove drones
-    for key in drone_keys:
-        if key in entities:
-            del entities[key]
-    print(f"    ✓ Removed {len(drone_keys)} drones")
+        # ── Backup and write ──
+        backup_path = sav_path.with_suffix(".sav.backup")
+        i = 0
+        while backup_path.exists():
+            i += 1
+            backup_path = sav_path.with_suffix(f".sav.backup{i}")
+        shutil.copy2(sav_path, backup_path)
+        print(f"\n  Backup: {backup_path}")
 
-    # ── Backup and write ──
-    backup_path = sav_path.with_suffix(".sav.backup")
-    i = 0
-    while backup_path.exists():
-        i += 1
-        backup_path = sav_path.with_suffix(f".sav.backup{i}")
-    shutil.copy2(sav_path, backup_path)
-    print(f"\n  Backup: {backup_path}")
+        write_sav(sav_path, data)
 
-    write_sav(sav_path, data)
+        print(f"\n  ✓ Done! {junctions_fixed} junctions fixed")
+        print(f"  ✓ Load the save and verify")
 
-    print(f"\n  ✓ Done! {junctions_fixed} junctions fixed")
-    print(f"  ✓ Load the save and verify")
+    # ── JSON export (works in both dry-run and apply modes) ──
+    if args.json:
+        json_path = sav_path.with_suffix(".sav.json")
+        json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n  JSON export: {json_path}")
 
 
 if __name__ == "__main__":
