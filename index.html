@@ -718,8 +718,8 @@ function getSplineData(entity) {
     const s = frag.match(/StartEntity=\(ID=(\d+)\)/);
     const e = frag.match(/EndEntity=\(ID=(\d+)\)/);
     if (!s || !e) continue;
-    const positions = [...frag.matchAll(/Position=\(X=([\-\d.]+),Y=([\-\d.]+)/g)]
-      .map(m => [parseFloat(m[1]), parseFloat(m[2])]);
+    const positions = [...frag.matchAll(/Position=\(X=([\-\d.]+),Y=([\-\d.]+),Z=([\-\d.]+)\)/g)]
+      .map(m => [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])]);
     return {
       startId: parseInt(s[1]),
       endId: parseInt(e[1]),
@@ -746,19 +746,80 @@ function rewriteSplineField(entity, oldId, newId, field) {
   return false;
 }
 
-function makePoleEntity() {
+function capturePoleTemplate(entities) {
+  for (const [key, value] of Object.entries(entities)) {
+    if (typeof value !== 'object' || Array.isArray(value)) continue;
+    const config = getConfig(value);
+    if (!config.includes('DroneRailSupport') && !config.includes('DronePole')) continue;
+    if (!Array.isArray(value.fragmentValues)) continue;
+
+    const template = JSON.parse(JSON.stringify(value));
+
+    template.spawnData.entityConfigDataPath =
+      "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole";
+
+    template.fragmentValues = template.fragmentValues.filter(frag => {
+      if (typeof frag !== 'string') return true;
+      if (frag.includes('CrLogisticsIntersectionFragment')) return false;
+      return true;
+    });
+
+    for (let i = 0; i < template.fragmentValues.length; i++) {
+      if (typeof template.fragmentValues[i] === 'string' &&
+          template.fragmentValues[i].includes('AuAPMassFragment')) {
+        template.fragmentValues[i] =
+          "/Script/AuActorPlacement.AuAPMassFragment(MainMeshZOffset=0.000000,SpawnServerTimeSeconds=0.000000)";
+        break;
+      }
+    }
+
+    template.spawnData.transform.translation = { x: 0, y: 0, z: 0 };
+    template.spawnData.transform.rotation = { x: 0, y: 0, z: 0, w: 1 };
+    template.spawnData.transform.scale3D = { x: 1, y: 1, z: 1 };
+    template.tags = [];
+
+    return template;
+  }
+  return null;
+}
+
+function makePoleFromTemplate(template, position, worldTime) {
+  const pole = JSON.parse(JSON.stringify(template));
+  pole.spawnData.transform.translation = { x: position.x, y: position.y, z: position.z };
+
+  for (let i = 0; i < pole.fragmentValues.length; i++) {
+    if (typeof pole.fragmentValues[i] === 'string' &&
+        pole.fragmentValues[i].includes('AuAPMassFragment')) {
+      pole.fragmentValues[i] = pole.fragmentValues[i].replace(
+        /SpawnServerTimeSeconds=[\-\d.]+/,
+        `SpawnServerTimeSeconds=${worldTime.toFixed(6)}`
+      );
+      break;
+    }
+  }
+
+  return pole;
+}
+
+function makeFallbackPoleEntity(position, worldTime) {
+  const pos = position || { x: 0, y: 0, z: 0 };
+  const wt = (worldTime || 0).toFixed(6);
   return {
     spawnData: {
       entityConfigDataPath: "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole",
       transform: {
         rotation: { x: 0, y: 0, z: 0, w: 1 },
-        translation: { x: 0, y: 0, z: 0 },
+        translation: { x: pos.x, y: pos.y, z: pos.z },
         scale3D: { x: 1, y: 1, z: 1 }
       }
     },
     tags: [],
     fragmentValues: [
-      "/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)"
+      `/Script/AuActorPlacement.AuAPMassFragment(MainMeshZOffset=0.000000,SpawnServerTimeSeconds=${wt})`,
+      "/Script/Chimera.CrMassBuildingStabilityData(Strength=0.000000,Cost=0.000000)",
+      "/Script/Chimera.CrBuildingStateFragment(bInitialized=True,bDisabled=False,MalfunctionFlags=None)",
+      "/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)",
+      "/Script/Chimera.CrMassTemperatureFragment(CurrentHeat=0.000000,Modifiers=(CalculatedValue=0.000000,Modifiers=(),bDirty=False,LastFilter=Unknown))"
     ]
   };
 }
@@ -806,6 +867,9 @@ function runFixAlgorithm(data, apply) {
 
     if (config.includes('DroneLane_3')) junctionIds[eid] = '3-way';
     else if (config.includes('DroneLane_5')) junctionIds[eid] = '5-way';
+    else if (config.includes('DroneMerger_3To1')) junctionIds[eid] = 'merger-3';
+    else if (config.includes('DroneMerger_5To1')) junctionIds[eid] = 'merger-5';
+    else if (config.includes('DA_DroneJunction_4')) junctionIds[eid] = '4-way';
     if (config.includes('DroneInvisiblePole')) poleKeys.push(key);
     if (config.includes('RailDroneConfig')) droneKeys.push(key);
 
@@ -824,6 +888,15 @@ function runFixAlgorithm(data, apply) {
   log(`Splines: ${splines.length}`, 'info');
   log(`Old poles: ${poleKeys.length}`, 'info');
   log(`Drones: ${droneKeys.length}`, 'info');
+
+  // ── Capture pole template ──
+  const poleTemplate = capturePoleTemplate(entities);
+  if (poleTemplate) {
+    log(`Template: captured (${poleTemplate.fragmentValues.length} fragments)`, 'info');
+  } else {
+    log('WARNING: No template pole found, using fallback minimal entity', 'warn');
+  }
+  const worldTime = typeof data.worldTimeSeconds === 'number' ? data.worldTimeSeconds : 0;
 
   // ── Per-junction spline index ──
   const junctionTouches = {};
@@ -862,6 +935,9 @@ function runFixAlgorithm(data, apply) {
     const touches = junctionTouches[jid] || [];
     if (touches.length < 2) { junctionsSkipped++; continue; }
 
+    const junctionEntity = entities[`(ID=${jid})`];
+    const junctionZ = junctionEntity?.spawnData?.transform?.translation?.z || 0;
+
     // Group by neighbor
     const byNeighbor = {};
     for (const t of touches) {
@@ -898,7 +974,26 @@ function runFixAlgorithm(data, apply) {
     // One pole per lane
     for (const cluster of clusters) {
       const poleId = nextId++;
-      newPoles[poleId] = makePoleEntity();
+
+      // Compute pole position from cluster spline endpoints
+      const clusterPositions = cluster.map(([val, t]) => t.pos).filter(Boolean);
+      let polePos;
+      if (clusterPositions.length > 0) {
+        const avgX = clusterPositions.reduce((s, p) => s + p[0], 0) / clusterPositions.length;
+        const avgY = clusterPositions.reduce((s, p) => s + p[1], 0) / clusterPositions.length;
+        const avgZ = clusterPositions[0].length >= 3
+          ? clusterPositions.reduce((s, p) => s + p[2], 0) / clusterPositions.length
+          : junctionZ;
+        polePos = { x: avgX, y: avgY, z: avgZ };
+      } else {
+        polePos = { x: 0, y: 0, z: junctionZ };
+      }
+
+      if (poleTemplate) {
+        newPoles[poleId] = makePoleFromTemplate(poleTemplate, polePos, worldTime);
+      } else {
+        newPoles[poleId] = makeFallbackPoleEntity(polePos, worldTime);
+      }
 
       for (const [val, touch] of cluster) {
         allChanges.push({
