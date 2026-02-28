@@ -464,8 +464,8 @@
     <div class="header-badge">Client-side · No upload · Your save stays local</div>
     <h1>StarRupture <span class="highlight">Junction Fix</span></h1>
     <p class="subtitle">
-      Fixes the drone junction save/load bug where all drones collapse to the center lane.
-      Works on any number of 3-way and 5-way junctions.
+      Fixes the drone junction save/load bug where drones collapse to the center lane
+      or items teleport between junctions. Works on all junction types.
     </p>
   </div>
 
@@ -492,6 +492,10 @@
     <button class="btn btn-secondary" id="btnDryRun" disabled>Dry Run</button>
     <button class="btn btn-primary" id="btnApply" disabled>Fix & Download</button>
   </div>
+  <div class="actions">
+    <button class="btn btn-secondary" id="btnRevertDry" disabled>Revert Dry Run</button>
+    <button class="btn btn-primary" id="btnRevert" disabled style="background: var(--error);">Revert & Download</button>
+  </div>
 
   <!-- Results -->
   <div class="results" id="results">
@@ -516,22 +520,24 @@
       <div class="info-card">
         <div class="info-card-num">1</div>
         <div class="info-card-text">
-          <strong>The bug:</strong> Junctions lose their socket-to-pole mapping on save/load because
-          <code>FCrLogisticsSocketsFragment</code> isn't savable. All drones collapse to the center lane.
+          <strong>The bug:</strong> Junctions lose their <code>CrLogisticsSocketsFragment</code> on save/load
+          because the game doesn't persist it. Without socket positions, drones can't route through junctions
+          and items teleport between them.
         </div>
       </div>
       <div class="info-card">
         <div class="info-card-num">2</div>
         <div class="info-card-text">
-          <strong>The fix:</strong> Rewrites spline endpoints so each lane connects through a dedicated
-          invisible pole instead of sharing the junction entity. The game's loader can't collapse them.
+          <strong>The fix:</strong> Writes socket position data directly into every junction entity,
+          derived from existing spline endpoint coordinates. No new entities are created.
+          With the <strong>SocketSaveFix</strong> mod, the fix is permanent. Without the mod, re-run after each load.
         </div>
       </div>
       <div class="info-card">
         <div class="info-card-num">3</div>
         <div class="info-card-text">
-          <strong>Safe:</strong> Creates a backup, removes stale poles and drones (they respawn), and
-          everything runs in your browser — your save file is never uploaded anywhere.
+          <strong>Safe:</strong> No entities are added or removed. Everything runs in your browser —
+          your save file is never uploaded anywhere.
         </div>
       </div>
     </div>
@@ -568,6 +574,8 @@ const logStatus = $('logStatus');
 const results = $('results');
 const statsGrid = $('statsGrid');
 const btnDownload = $('btnDownload');
+const btnRevertDry = $('btnRevertDry');
+const btnRevert = $('btnRevert');
 
 dropzone.addEventListener('dragover', e => {
   e.preventDefault();
@@ -585,6 +593,8 @@ fileInput.addEventListener('change', e => {
 $('fileRemove').addEventListener('click', resetFile);
 btnDryRun.addEventListener('click', () => runFix(false));
 btnApply.addEventListener('click', () => runFix(true));
+btnRevertDry.addEventListener('click', () => runRevert(false));
+btnRevert.addEventListener('click', () => runRevert(true));
 btnDownload.addEventListener('click', downloadFixed);
 
 function handleFile(file) {
@@ -600,6 +610,8 @@ function handleFile(file) {
   dropzone.style.display = 'none';
   btnDryRun.disabled = false;
   btnApply.disabled = false;
+  btnRevertDry.disabled = false;
+  btnRevert.disabled = false;
   resetResults();
 }
 
@@ -610,6 +622,8 @@ function resetFile() {
   dropzone.style.display = '';
   btnDryRun.disabled = true;
   btnApply.disabled = true;
+  btnRevertDry.disabled = true;
+  btnRevert.disabled = true;
   fileInput.value = '';
   resetResults();
 }
@@ -746,105 +760,95 @@ function rewriteSplineField(entity, oldId, newId, field) {
   return false;
 }
 
-function capturePoleTemplate(entities) {
-  for (const [key, value] of Object.entries(entities)) {
-    if (typeof value !== 'object' || Array.isArray(value)) continue;
-    const config = getConfig(value);
-    if (!config.includes('DroneRailSupport') && !config.includes('DronePole')) continue;
-    if (!Array.isArray(value.fragmentValues)) continue;
+// DroneLane_3 local socket offsets: 3 lanes, each with side A and side B
+const DRONE_LANE_3_OFFSETS = [
+  // Lane 0 (center): [side_a, side_b]
+  [[0.000001, -54.186704, 307.937676], [0.011049, 54.179305, 307.218374]],
+  // Lane 1 (left):
+  [[-19.939297, -54.000000, 307.937676], [-20.000000, 54.000000, 307.218374]],
+  // Lane 2 (right):
+  [[19.991659, -54.000000, 307.937676], [20.000000, 54.000000, 307.218374]],
+];
 
-    const template = JSON.parse(JSON.stringify(value));
-
-    template.spawnData.entityConfigDataPath =
-      "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole";
-
-    template.fragmentValues = template.fragmentValues.filter(frag => {
-      if (typeof frag !== 'string') return true;
-      if (frag.includes('CrLogisticsIntersectionFragment')) return false;
-      return true;
-    });
-
-    for (let i = 0; i < template.fragmentValues.length; i++) {
-      if (typeof template.fragmentValues[i] === 'string' &&
-          template.fragmentValues[i].includes('AuAPMassFragment')) {
-        template.fragmentValues[i] =
-          "/Script/AuActorPlacement.AuAPMassFragment(MainMeshZOffset=0.000000,SpawnServerTimeSeconds=0.000000)";
-        break;
-      }
+const INVISIBLE_POLE_TEMPLATE = {
+  spawnData: {
+    entityConfigDataPath: "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole",
+    transform: {
+      rotation: {x: 0, y: 0, z: 0, w: 1},
+      translation: {x: 0, y: 0, z: 0},
+      scale3D: {x: 1, y: 1, z: 1}
     }
+  },
+  tags: [],
+  fragmentValues: ["/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)"]
+};
 
-    template.spawnData.transform.translation = { x: 0, y: 0, z: 0 };
-    template.spawnData.transform.rotation = { x: 0, y: 0, z: 0, w: 1 };
-    template.spawnData.transform.scale3D = { x: 1, y: 1, z: 1 };
-    template.tags = [];
+function rotateByQuat(offset, q) {
+  const [ox, oy, oz] = offset;
+  const [qx, qy, qz, qw] = q;
+  const tx = 2 * (qy*oz - qz*oy);
+  const ty = 2 * (qz*ox - qx*oz);
+  const tz = 2 * (qx*oy - qy*ox);
+  return [
+    ox + qw*tx + (qy*tz - qz*ty),
+    oy + qw*ty + (qz*tx - qx*tz),
+    oz + qw*tz + (qx*ty - qy*tx),
+  ];
+}
 
-    return template;
+function getMaxEntityId(entities) {
+  let max = 0;
+  for (const key of Object.keys(entities)) {
+    const eid = extractId(key);
+    if (eid !== null && eid > max) max = eid;
   }
-  return null;
+  return max;
 }
 
-function makePoleFromTemplate(template, position, worldTime) {
-  const pole = JSON.parse(JSON.stringify(template));
-  pole.spawnData.transform.translation = { x: position.x, y: position.y, z: position.z };
-
-  for (let i = 0; i < pole.fragmentValues.length; i++) {
-    if (typeof pole.fragmentValues[i] === 'string' &&
-        pole.fragmentValues[i].includes('AuAPMassFragment')) {
-      pole.fragmentValues[i] = pole.fragmentValues[i].replace(
-        /SpawnServerTimeSeconds=[\-\d.]+/,
-        `SpawnServerTimeSeconds=${worldTime.toFixed(6)}`
-      );
-      break;
-    }
-  }
-
-  return pole;
-}
-
-function makeFallbackPoleEntity(position, worldTime) {
-  const pos = position || { x: 0, y: 0, z: 0 };
-  const wt = (worldTime || 0).toFixed(6);
-  return {
-    spawnData: {
-      entityConfigDataPath: "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole",
-      transform: {
-        rotation: { x: 0, y: 0, z: 0, w: 1 },
-        translation: { x: pos.x, y: pos.y, z: pos.z },
-        scale3D: { x: 1, y: 1, z: 1 }
-      }
-    },
-    tags: [],
-    fragmentValues: [
-      `/Script/AuActorPlacement.AuAPMassFragment(MainMeshZOffset=0.000000,SpawnServerTimeSeconds=${wt})`,
-      "/Script/Chimera.CrMassBuildingStabilityData(Strength=0.000000,Cost=0.000000)",
-      "/Script/Chimera.CrBuildingStateFragment(bInitialized=True,bDisabled=False,MalfunctionFlags=None)",
-      "/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)",
-      "/Script/Chimera.CrMassTemperatureFragment(CurrentHeat=0.000000,Modifiers=(CalculatedValue=0.000000,Modifiers=(),bDirty=False,LastFilter=Unknown))"
-    ]
-  };
-}
-
-function detectLaneAxis(positions) {
-  if (positions.length < 2) return 'x';
-  const xs = positions.map(p => p[0]);
-  const ys = positions.map(p => p[1]);
-  const xSpread = Math.max(...xs) - Math.min(...xs);
-  const ySpread = Math.max(...ys) - Math.min(...ys);
-  return xSpread > ySpread ? 'x' : 'y';
-}
-
-function clusterByValue(items, tolerance = 15.0) {
-  if (!items.length) return [];
-  items.sort((a, b) => a[0] - b[0]);
-  const clusters = [[items[0]]];
-  for (let i = 1; i < items.length; i++) {
-    if (Math.abs(items[i][0] - items[i - 1][0]) <= tolerance) {
-      clusters[clusters.length - 1].push(items[i]);
-    } else {
-      clusters.push([items[i]]);
+function matchSplineToSocket(socketPos, touches, tolerance = 15.0) {
+  let bestDist = tolerance;
+  let bestType = null;
+  for (const t of touches) {
+    if (!t.pos) continue;
+    const dist = Math.sqrt(
+      (socketPos[0] - t.pos[0])**2 +
+      (socketPos[1] - t.pos[1])**2 +
+      (socketPos[2] - t.pos[2])**2
+    );
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestType = t.field === 'Start' ? 'Output' : 'Input';
     }
   }
-  return clusters;
+  return bestType;
+}
+
+function buildSocketFragment(socketPositions) {
+  // socketPositions: array of {x, y, z, connectionType, poleId}
+  const parts = socketPositions.map(s => {
+    let str = `WorldPosition=(X=${s.x.toFixed(6)},Y=${s.y.toFixed(6)},Z=${s.z.toFixed(6)})`;
+    if (s.connectionType) {
+      str += `,ConnectionType=${s.connectionType}`;
+      str += ',ConnectionEntity=()';
+    }
+    if (s.poleId != null) {
+      str += `,SocketPairInvisibleConnector=(ID=${s.poleId})`;
+    }
+    return `(${str})`;
+  });
+  return `/Script/Chimera.CrLogisticsSocketsFragment(Sockets=(${parts.join(',')}))`;
+}
+
+function writeSocketFragment(entity, fragmentStr) {
+  const frags = entity.fragmentValues || [];
+  for (let i = 0; i < frags.length; i++) {
+    if (typeof frags[i] === 'string' && frags[i].includes('CrLogisticsSocketsFragment')) {
+      frags[i] = fragmentStr;
+      return 'replaced';
+    }
+  }
+  frags.push(fragmentStr);
+  return 'added';
 }
 
 function runFixAlgorithm(data, apply) {
@@ -894,7 +898,6 @@ function runFixAlgorithm(data, apply) {
         allEids.delete(extractId(key));
       }
 
-      // Clean up intersection fragments referencing removed entities
       let cleanedIntersections = 0;
       for (const [key, value] of Object.entries(entities)) {
         if (typeof value !== 'object' || Array.isArray(value)) continue;
@@ -910,7 +913,6 @@ function runFixAlgorithm(data, apply) {
         }
       }
 
-      // Clean up electricity connectorData
       let cleanedElec = 0;
       const elecConn = data?.itemData?.Mass?.electricitySubsystemState?.connectorData;
       if (elecConn && typeof elecConn === 'object') {
@@ -935,7 +937,6 @@ function runFixAlgorithm(data, apply) {
   const junctionIds = {};
   const splines = [];
   const poleKeys = [];
-  const droneKeys = [];
 
   for (const [key, value] of Object.entries(entities)) {
     const eid = extractId(key);
@@ -948,7 +949,6 @@ function runFixAlgorithm(data, apply) {
     else if (config.includes('DroneMerger_5To1')) junctionIds[eid] = 'merger-5';
     else if (config.includes('DA_DroneJunction_4')) junctionIds[eid] = '4-way';
     if (config.includes('DroneInvisiblePole')) poleKeys.push(key);
-    if (config.includes('RailDroneConfig')) droneKeys.push(key);
 
     const sd = getSplineData(value);
     if (sd) {
@@ -963,17 +963,10 @@ function runFixAlgorithm(data, apply) {
 
   log(`Junctions: ${Object.keys(junctionIds).length}`, 'info');
   log(`Splines: ${splines.length}`, 'info');
-  log(`Old poles: ${poleKeys.length}`, 'info');
-  log(`Drones: ${droneKeys.length}`, 'info');
 
-  // ── Capture pole template ──
-  const poleTemplate = capturePoleTemplate(entities);
-  if (poleTemplate) {
-    log(`Template: captured (${poleTemplate.fragmentValues.length} fragments)`, 'info');
-  } else {
-    log('WARNING: No template pole found, using fallback minimal entity', 'warn');
+  if (poleKeys.length > 0) {
+    log(`WARNING: ${poleKeys.length} invisible poles detected! Run Revert first.`, 'warn');
   }
-  const worldTime = typeof data.worldTimeSeconds === 'number' ? data.worldTimeSeconds : 0;
 
   // ── Per-junction spline index ──
   const junctionTouches = {};
@@ -993,115 +986,119 @@ function runFixAlgorithm(data, apply) {
     }
   }
 
-  // ── Process each junction ──
-  let maxId = 0;
-  for (const key of Object.keys(entities)) {
-    const eid = extractId(key);
-    if (eid && eid < 4294967295) maxId = Math.max(maxId, eid);
-  }
-  let nextId = maxId + 1;
-
-  const newPoles = {};
-  const allChanges = [];
+  // ── Process each junction: write socket data ──
+  let nextEntityId = getMaxEntityId(entities) + 1;
+  const socketWrites = [];
+  const newPoles = [];
   let junctionsFixed = 0;
+  let lane3Fixed = 0;
   let junctionsSkipped = 0;
+  let alreadyHasSockets = 0;
 
   const sortedJids = Object.keys(junctionIds).map(Number).sort((a, b) => a - b);
 
   for (const jid of sortedJids) {
     const touches = junctionTouches[jid] || [];
-    if (touches.length < 2) { junctionsSkipped++; continue; }
+    if (touches.length === 0) { junctionsSkipped++; continue; }
 
     const junctionEntity = entities[`(ID=${jid})`];
-    const junctionZ = junctionEntity?.spawnData?.transform?.translation?.z || 0;
+    if (!junctionEntity) { junctionsSkipped++; continue; }
 
-    // Group by neighbor
-    const byNeighbor = {};
-    for (const t of touches) {
-      if (!byNeighbor[t.neighbor]) byNeighbor[t.neighbor] = [];
-      byNeighbor[t.neighbor].push(t);
+    const jtype = junctionIds[jid];
+
+    // ── DroneLane_3: needs invisible pole pairing ──
+    if (jtype === '3-way') {
+      // Check if already has SocketPairInvisibleConnector
+      const existingFrag = (junctionEntity.fragmentValues || []).find(
+        f => typeof f === 'string' && f.includes('CrLogisticsSocketsFragment')
+      );
+      if (existingFrag && existingFrag.includes('SocketPairInvisibleConnector')) {
+        alreadyHasSockets++;
+        junctionsSkipped++;
+        continue;
+      }
+
+      // Get entity transform
+      const transform = junctionEntity?.spawnData?.transform || {};
+      const pos = transform.translation || {};
+      const rot = transform.rotation || {};
+      const ex = pos.x || 0, ey = pos.y || 0, ez = pos.z || 0;
+      const q = [rot.x || 0, rot.y || 0, rot.z || 0, rot.w ?? 1];
+
+      // Allocate 3 pole IDs
+      const poleIds = [nextEntityId, nextEntityId + 1, nextEntityId + 2];
+      nextEntityId += 3;
+
+      // Build 6 socket positions (3 lanes x 2 sides)
+      const socketPositions = [];
+      for (let lane = 0; lane < DRONE_LANE_3_OFFSETS.length; lane++) {
+        const [offsetA, offsetB] = DRONE_LANE_3_OFFSETS[lane];
+        const pid = poleIds[lane];
+
+        const ra = rotateByQuat(offsetA, q);
+        const rb = rotateByQuat(offsetB, q);
+
+        const wa = [ex + ra[0], ey + ra[1], ez + ra[2]];
+        const wb = [ex + rb[0], ey + rb[1], ez + rb[2]];
+
+        const ctypeA = matchSplineToSocket(wa, touches);
+        const ctypeB = matchSplineToSocket(wb, touches);
+
+        socketPositions.push({ x: wa[0], y: wa[1], z: wa[2], connectionType: ctypeA, poleId: pid });
+        socketPositions.push({ x: wb[0], y: wb[1], z: wb[2], connectionType: ctypeB, poleId: pid });
+      }
+
+      const fragStr = buildSocketFragment(socketPositions);
+      newPoles.push(...poleIds);
+      socketWrites.push({ jid, entity: junctionEntity, fragStr, numSockets: 6 });
+      junctionsFixed++;
+      lane3Fixed++;
+
+    // ── Other junction types: basic socket fragment ──
+    } else {
+      const existingSocket = (junctionEntity.fragmentValues || []).some(
+        f => typeof f === 'string' && f.includes('CrLogisticsSocketsFragment')
+      );
+      if (existingSocket) {
+        alreadyHasSockets++;
+        junctionsSkipped++;
+        continue;
+      }
+
+      const socketPositions = [];
+      const seenPositions = new Set();
+      for (const t of touches) {
+        if (!t.pos) continue;
+        const posKey = `${t.pos[0].toFixed(1)},${t.pos[1].toFixed(1)},${t.pos[2].toFixed(1)}`;
+        if (seenPositions.has(posKey)) continue;
+        seenPositions.add(posKey);
+        const connectionType = t.field === 'Start' ? 'Output' : 'Input';
+        socketPositions.push({ x: t.pos[0], y: t.pos[1], z: t.pos[2], connectionType });
+      }
+
+      if (socketPositions.length === 0) { junctionsSkipped++; continue; }
+
+      const fragStr = buildSocketFragment(socketPositions);
+      socketWrites.push({ jid, entity: junctionEntity, fragStr, numSockets: socketPositions.length });
+      junctionsFixed++;
     }
-
-    // Find lane axis from a multi-spline neighbor group
-    let laneAxis = null;
-    for (const group of Object.values(byNeighbor)) {
-      if (group.length >= 2) {
-        const positions = group.map(t => t.pos).filter(Boolean);
-        if (positions.length >= 2) {
-          laneAxis = detectLaneAxis(positions);
-          break;
-        }
-      }
-    }
-
-    if (!laneAxis) { junctionsSkipped++; continue; }
-
-    // Cluster all touches by lane axis
-    const laneItems = [];
-    for (const t of touches) {
-      if (t.pos) {
-        const val = laneAxis === 'x' ? t.pos[0] : t.pos[1];
-        laneItems.push([val, t]);
-      }
-    }
-
-    const clusters = clusterByValue(laneItems, 15.0);
-    if (clusters.length <= 1) { junctionsSkipped++; continue; }
-
-    // One pole per lane
-    for (const cluster of clusters) {
-      const poleId = nextId++;
-
-      // Compute pole position from cluster spline endpoints
-      const clusterPositions = cluster.map(([val, t]) => t.pos).filter(Boolean);
-      let polePos;
-      if (clusterPositions.length > 0) {
-        const avgX = clusterPositions.reduce((s, p) => s + p[0], 0) / clusterPositions.length;
-        const avgY = clusterPositions.reduce((s, p) => s + p[1], 0) / clusterPositions.length;
-        const avgZ = clusterPositions[0].length >= 3
-          ? clusterPositions.reduce((s, p) => s + p[2], 0) / clusterPositions.length
-          : junctionZ;
-        polePos = { x: avgX, y: avgY, z: avgZ };
-      } else {
-        polePos = { x: 0, y: 0, z: junctionZ };
-      }
-
-      if (poleTemplate) {
-        newPoles[poleId] = makePoleFromTemplate(poleTemplate, polePos, worldTime);
-      } else {
-        newPoles[poleId] = makeFallbackPoleEntity(polePos, worldTime);
-      }
-
-      for (const [val, touch] of cluster) {
-        allChanges.push({
-          entity: touch.spline.entity,
-          field: touch.field,
-          junctionId: jid,
-          poleId: poleId,
-          splineId: touch.spline.id,
-        });
-      }
-    }
-    junctionsFixed++;
   }
 
   // ── Summary ──
   log('');
-  log('═══════════════════════════════════════', 'header');
-  log('  SUMMARY', 'header');
-  log('═══════════════════════════════════════', 'header');
-  log(`  Junctions fixed: ${junctionsFixed}`, 'info');
+  log('Junction Fix', 'header');
+  log(`  Junctions to fix: ${junctionsFixed}`, 'info');
+  if (lane3Fixed) {
+    log(`    DroneLane_3 (with pole pairing): ${lane3Fixed}`, 'info');
+    log(`    Other junction types: ${junctionsFixed - lane3Fixed}`, 'info');
+  }
+  log(`  Invisible poles to create: ${newPoles.length}`, 'info');
   log(`  Junctions skipped: ${junctionsSkipped}`, 'info');
-  log(`  Spline rewrites: ${allChanges.length}`, 'info');
-  log(`  New poles: ${Object.keys(newPoles).length}`, 'info');
-  log(`  Old poles to remove: ${poleKeys.length}`, 'info');
-  log(`  Drones to remove: ${droneKeys.length}`, 'info');
+  if (alreadyHasSockets) log(`  Already have socket data: ${alreadyHasSockets}`, 'info');
 
   const stats = [
     ['Junctions Fixed', junctionsFixed],
-    ['Spline Rewrites', allChanges.length],
-    ['New Poles', Object.keys(newPoles).length],
-    ['Drones Cleared', droneKeys.length],
+    ['Poles Created', newPoles.length],
   ];
 
   if (!apply) {
@@ -1112,42 +1109,222 @@ function runFixAlgorithm(data, apply) {
   // ── Apply ──
   log('\n  Applying...', 'info');
 
-  // Create poles
-  for (const [poleId, poleEntity] of Object.entries(newPoles)) {
-    entities[`(ID=${poleId})`] = poleEntity;
+  // Create invisible pole entities
+  for (const pid of newPoles) {
+    entities[`(ID=${pid})`] = JSON.parse(JSON.stringify(INVISIBLE_POLE_TEMPLATE));
   }
-  log(`  ✓ Created ${Object.keys(newPoles).length} poles`, 'success');
+  if (newPoles.length) log(`  Created ${newPoles.length} invisible pole entities`, 'success');
 
-  // Rewrite splines (dedup)
-  const done = new Set();
+  for (const sw of socketWrites) {
+    writeSocketFragment(sw.entity, sw.fragStr);
+  }
+  log(`  Written ${socketWrites.length} socket fragments`, 'success');
+  log('', 'info');
+  log('  With SocketSaveFix mod: permanent fix', 'info');
+  log('  Without mod: fix lasts until next save/load', 'info');
+
+  return { stats, applied: true, data };
+}
+
+// ─── Revert Algorithm ────────────────────────────────────────────────────
+
+function revertFixAlgorithm(data, apply) {
+  const entities = findEntityContainer(data);
+  if (!entities) {
+    log('ERROR: No entity container found', 'error');
+    return null;
+  }
+
+  // Find all invisible poles with positions
+  const poles = {};  // eid -> {x, y, z}
+  const poleKeys = [];
+  for (const [key, value] of Object.entries(entities)) {
+    const eid = extractId(key);
+    if (eid === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    const config = getConfig(value);
+    if (config.includes('DroneInvisiblePole')) {
+      poleKeys.push(key);
+      const pos = value?.spawnData?.transform?.translation || {};
+      poles[eid] = { x: pos.x || 0, y: pos.y || 0, z: pos.z || 0 };
+    }
+  }
+
+  if (Object.keys(poles).length === 0) {
+    log('No invisible poles found. Nothing to revert.', 'info');
+    return { stats: [['Poles Found', 0], ['Rewrites', 0]], applied: false };
+  }
+
+  log(`Invisible poles found: ${Object.keys(poles).length}`, 'info');
+
+  // Find all junction/merger entities with positions
+  const junctions = {};  // eid -> {x, y, z}
+  for (const [key, value] of Object.entries(entities)) {
+    const eid = extractId(key);
+    if (eid === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    const config = getConfig(value);
+    if (config.includes('DroneLane_3') || config.includes('DroneLane_5') ||
+        config.includes('DroneMerger_3To1') || config.includes('DroneMerger_5To1') ||
+        config.includes('DA_DroneJunction_4')) {
+      const pos = value?.spawnData?.transform?.translation || {};
+      junctions[eid] = { x: pos.x || 0, y: pos.y || 0, z: pos.z || 0 };
+    }
+  }
+
+  log(`Junctions/mergers found: ${Object.keys(junctions).length}`, 'info');
+
+  // Find splines connected to poles and map to nearest junction
+  const poleSet = new Set(Object.keys(poles).map(Number));
+  const splineRewrites = [];  // {key, entity, field, poleId, junctionId}
+
+  for (const [key, value] of Object.entries(entities)) {
+    if (typeof value !== 'object' || Array.isArray(value)) continue;
+    const sd = getSplineData(value);
+    if (!sd) continue;
+
+    for (const [field, eidVal] of [['Start', sd.startId], ['End', sd.endId]]) {
+      if (!poleSet.has(eidVal)) continue;
+      const polePos = poles[eidVal];
+
+      // Find nearest junction/merger
+      let bestJid = null;
+      let bestDist = Infinity;
+      for (const [jidStr, jpos] of Object.entries(junctions)) {
+        const jid = parseInt(jidStr);
+        const dist = Math.sqrt(
+          (polePos.x - jpos.x) ** 2 +
+          (polePos.y - jpos.y) ** 2 +
+          (polePos.z - jpos.z) ** 2
+        );
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestJid = jid;
+        }
+      }
+
+      if (bestJid !== null && bestDist <= 500.0) {
+        splineRewrites.push({ key, entity: value, field, poleId: eidVal, junctionId: bestJid });
+      }
+    }
+  }
+
+  log(`Spline rewrites needed: ${splineRewrites.length}`, 'info');
+  log(`Poles to delete: ${poleKeys.length}`, 'info');
+
+  const stats = [
+    ['Poles Found', Object.keys(poles).length],
+    ['Rewrites', splineRewrites.length],
+  ];
+
+  if (!apply) {
+    log('\n  DRY RUN complete. Click "Revert & Download" to apply.', 'warn');
+    return { stats, applied: false };
+  }
+
+  // Apply rewrites
+  log('\n  Applying revert...', 'info');
   let okCount = 0, failCount = 0;
-  for (const ch of allChanges) {
-    const key = `${ch.splineId}:${ch.field}`;
-    if (done.has(key)) continue;
-    done.add(key);
-    if (rewriteSplineField(ch.entity, ch.junctionId, ch.poleId, ch.field)) {
+  for (const rw of splineRewrites) {
+    if (rewriteSplineField(rw.entity, rw.poleId, rw.junctionId, rw.field)) {
       okCount++;
     } else {
       failCount++;
-      log(`  ✗ FAILED: Spline ${ch.splineId} ${ch.field} ${ch.junctionId}→${ch.poleId}`, 'error');
     }
   }
-  log(`  ✓ Rewrote ${okCount} endpoints (${failCount} failed)`, 'success');
+  log(`  Rewrote ${okCount} spline endpoints (${failCount} failed)`, 'success');
 
-  // Remove old poles
-  let removedPoles = 0;
+  // Delete invisible poles
+  let removed = 0;
+  const poleIdSet = new Set(Object.keys(poles).map(Number));
   for (const key of poleKeys) {
-    if (entities[key] !== undefined) { delete entities[key]; removedPoles++; }
+    if (entities[key] !== undefined) { delete entities[key]; removed++; }
   }
-  log(`  ✓ Removed ${removedPoles} old poles`, 'success');
+  log(`  Removed ${removed} invisible poles`, 'success');
 
-  // Remove drones
-  for (const key of droneKeys) {
-    if (entities[key] !== undefined) delete entities[key];
+  // Clean up electricity connectorData
+  let cleanedElec = 0;
+  const elecConn = data?.itemData?.Mass?.electricitySubsystemState?.connectorData;
+  if (elecConn && typeof elecConn === 'object') {
+    for (const key of Object.keys(elecConn)) {
+      const m = key.match(/\(ID=(\d+)\)/);
+      if (m && poleIdSet.has(parseInt(m[1]))) {
+        delete elecConn[key];
+        cleanedElec++;
+      }
+    }
   }
-  log(`  ✓ Removed ${droneKeys.length} drones`, 'success');
+  if (cleanedElec) log(`  Cleaned ${cleanedElec} electricity entries`, 'success');
 
+  // Clean stale SocketPairInvisibleConnector references from socket fragments
+  let cleanedSocketRefs = 0;
+  for (const [key, value] of Object.entries(entities)) {
+    if (typeof value !== 'object' || Array.isArray(value)) continue;
+    const frags = value?.fragmentValues;
+    if (!Array.isArray(frags)) continue;
+    for (let i = 0; i < frags.length; i++) {
+      if (typeof frags[i] !== 'string' || !frags[i].includes('CrLogisticsSocketsFragment')) continue;
+      const connectors = [...frags[i].matchAll(/SocketPairInvisibleConnector=\(ID=(\d+)\)/g)];
+      if (connectors.some(m => poleIdSet.has(parseInt(m[1])))) {
+        frags[i] = frags[i].replace(/,SocketPairInvisibleConnector=\(ID=\d+\)/g, '');
+        cleanedSocketRefs++;
+      }
+    }
+  }
+  if (cleanedSocketRefs) log(`  Cleaned ${cleanedSocketRefs} stale socket connector refs`, 'success');
+
+  stats.push(['Poles Removed', removed]);
+  log('\n  Revert complete!', 'success');
   return { stats, applied: true, data };
+}
+
+// ─── Run Revert ──────────────────────────────────────────────────────────
+
+async function runRevert(apply) {
+  if (!loadedFile) return;
+
+  clearLog();
+  resetResults();
+  btnDryRun.disabled = true;
+  btnApply.disabled = true;
+  btnRevertDry.disabled = true;
+  btnRevert.disabled = true;
+  fixedBlob = null;
+
+  try {
+    log(apply ? 'Applying revert...' : 'Running revert dry run...', 'header');
+    log('');
+
+    const buffer = await loadedFile.arrayBuffer();
+    const data = readSav(buffer);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const result = revertFixAlgorithm(data, apply);
+
+    if (!result) {
+      logStatus.className = 'log-status error';
+      return;
+    }
+
+    showStats(result.stats);
+    logStatus.className = 'log-status done';
+
+    if (result.applied) {
+      log('\n  Writing reverted save...', 'info');
+      const output = writeSav(result.data);
+      fixedBlob = new Blob([output], { type: 'application/octet-stream' });
+      log('\n  Reverted! Click download below.', 'success');
+      btnDownload.style.display = 'block';
+    }
+  } catch (err) {
+    log(`\nERROR: ${err.message}`, 'error');
+    log(err.stack, 'error');
+    logStatus.className = 'log-status error';
+  }
+
+  btnDryRun.disabled = false;
+  btnApply.disabled = false;
+  btnRevertDry.disabled = false;
+  btnRevert.disabled = false;
 }
 
 // ─── Run ────────────────────────────────────────────────────────────────
@@ -1159,6 +1336,8 @@ async function runFix(apply) {
   resetResults();
   btnDryRun.disabled = true;
   btnApply.disabled = true;
+  btnRevertDry.disabled = true;
+  btnRevert.disabled = true;
   fixedBlob = null;
 
   try {
@@ -1185,7 +1364,7 @@ async function runFix(apply) {
       log('\n  Writing fixed save...', 'info');
       const output = writeSav(result.data);
       fixedBlob = new Blob([output], { type: 'application/octet-stream' });
-      log('\n  ✓ Fix applied! Click download below.', 'success');
+      log('\n  Fix applied! Click download below.', 'success');
       btnDownload.style.display = 'block';
     }
   } catch (err) {
@@ -1196,6 +1375,8 @@ async function runFix(apply) {
 
   btnDryRun.disabled = false;
   btnApply.disabled = false;
+  btnRevertDry.disabled = false;
+  btnRevert.disabled = false;
 }
 
 function downloadFixed() {
