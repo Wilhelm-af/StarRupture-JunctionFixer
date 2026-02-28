@@ -854,6 +854,83 @@ function runFixAlgorithm(data, apply) {
     return null;
   }
 
+  // ── Dangling reference cleanup ──
+  const allEids = new Set();
+  for (const key of Object.keys(entities)) {
+    const eid = extractId(key);
+    if (eid !== null) allEids.add(eid);
+  }
+
+  const brokenSplineKeys = [];
+  for (const [key, value] of Object.entries(entities)) {
+    if (typeof value !== 'object' || Array.isArray(value)) continue;
+    const frags = value?.fragmentValues;
+    if (!Array.isArray(frags)) continue;
+    for (const frag of frags) {
+      if (typeof frag !== 'string' || !frag.includes('AuSplineConnectionFragment')) continue;
+      const s = frag.match(/StartEntity=\(ID=(\d+)\)/);
+      const e = frag.match(/EndEntity=\(ID=(\d+)\)/);
+      if (s && e) {
+        if (!allEids.has(parseInt(s[1])) || !allEids.has(parseInt(e[1]))) {
+          brokenSplineKeys.push(key);
+          break;
+        }
+      }
+    }
+  }
+
+  if (brokenSplineKeys.length > 0) {
+    log(`Dangling splines found: ${brokenSplineKeys.length}`, 'warn');
+
+    const removedIds = new Set();
+    for (const key of brokenSplineKeys) {
+      const eid = extractId(key);
+      if (eid !== null) removedIds.add(eid);
+    }
+
+    if (apply) {
+      for (const key of brokenSplineKeys) {
+        delete entities[key];
+        allEids.delete(extractId(key));
+      }
+
+      // Clean up intersection fragments referencing removed entities
+      let cleanedIntersections = 0;
+      for (const [key, value] of Object.entries(entities)) {
+        if (typeof value !== 'object' || Array.isArray(value)) continue;
+        const frags = value?.fragmentValues;
+        if (!Array.isArray(frags)) continue;
+        for (let i = 0; i < frags.length; i++) {
+          if (typeof frags[i] !== 'string' || !frags[i].includes('CrLogisticsIntersectionFragment')) continue;
+          const refs = [...frags[i].matchAll(/Entity=\(ID=(\d+)\)/g)].map(m => parseInt(m[1]));
+          if (refs.some(r => removedIds.has(r))) {
+            frags[i] = '/Script/Chimera.CrLogisticsIntersectionFragment(CachedMoveSpeedPerLine=())';
+            cleanedIntersections++;
+          }
+        }
+      }
+
+      // Clean up electricity connectorData
+      let cleanedElec = 0;
+      const elecConn = data?.itemData?.Mass?.electricitySubsystemState?.connectorData;
+      if (elecConn && typeof elecConn === 'object') {
+        for (const key of Object.keys(elecConn)) {
+          const m = key.match(/\(ID=(\d+)\)/);
+          if (m && removedIds.has(parseInt(m[1]))) {
+            delete elecConn[key];
+            cleanedElec++;
+          }
+        }
+      }
+
+      log(`  Removed ${brokenSplineKeys.length} broken splines`, 'success');
+      log(`  Cleaned ${cleanedIntersections} intersection fragments`, 'success');
+      log(`  Cleaned ${cleanedElec} electricity entries`, 'success');
+    } else {
+      log(`  (will be removed on apply)`, 'warn');
+    }
+  }
+
   // ── Discovery ──
   const junctionIds = {};
   const splines = [];
