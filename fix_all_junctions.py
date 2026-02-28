@@ -110,14 +110,27 @@ def rotate_by_quat(offset, q):
 
 
 # DroneLane_3 local socket offsets: 3 lanes, each with side A and side B
-# Verified across 5 entities in WorkingSave.sav (identity rotation)
 DRONE_LANE_3_OFFSETS = [
     # Lane 0 (center): (side_a, side_b)
-    ((0.000001, -54.186704, 307.937676), (0.011049, 54.179305, 307.218374)),
+    ((0.0, -54.0, 307.937676), (0.0, 54.0, 307.218374)),
     # Lane 1 (left):
-    ((-19.939297, -54.000000, 307.937676), (-20.000000, 54.000000, 307.218374)),
+    ((-19.939297, -54.0, 307.937676), (-20.0, 54.0, 307.218374)),
     # Lane 2 (right):
-    ((19.991659, -54.000000, 307.937676), (20.000000, 54.000000, 307.218374)),
+    ((19.991659, -54.0, 307.937676), (20.0, 54.0, 307.218374)),
+]
+
+# DroneLane_5 local socket offsets: 5 lanes, each with side A and side B
+DRONE_LANE_5_OFFSETS = [
+    # Lane 0 (center): (side_a, side_b)
+    ((0.0, -54.0, 307.0), (0.0, 54.0, 307.0)),
+    # Lane 1 (inner-left):
+    ((-19.0, -54.0, 307.0), (-19.0, 54.0, 307.0)),
+    # Lane 2 (inner-right):
+    ((19.0, -54.0, 307.0), (19.0, 54.0, 307.0)),
+    # Lane 3 (outer-left):
+    ((-40.0, -54.0, 307.0), (-40.0, 54.0, 307.0)),
+    # Lane 4 (outer-right):
+    ((40.0, -54.0, 307.0), (40.0, 54.0, 307.0)),
 ]
 
 INVISIBLE_POLE_TEMPLATE = {
@@ -194,6 +207,44 @@ def write_socket_fragment(entity, fragment_str):
             return "replaced"
     frags.append(fragment_str)
     return "added"
+
+
+def build_lane_sockets(junction_entity, lane_offsets, touches, next_entity_id):
+    """Build socket positions with invisible pole pairing for a multi-lane entity.
+
+    Returns (socket_positions, pole_ids, frag_str, next_entity_id) or None if already fixed.
+    """
+    # Check if already has SocketPairInvisibleConnector
+    for f in junction_entity.get("fragmentValues", []):
+        if isinstance(f, str) and "CrLogisticsSocketsFragment" in f:
+            if "SocketPairInvisibleConnector" in f:
+                return None
+
+    # Get entity transform
+    transform = junction_entity.get("spawnData", {}).get("transform", {})
+    pos = transform.get("translation", {})
+    rot = transform.get("rotation", {})
+    ex, ey, ez = pos.get("x", 0), pos.get("y", 0), pos.get("z", 0)
+    qx, qy, qz, qw = rot.get("x", 0), rot.get("y", 0), rot.get("z", 0), rot.get("w", 1)
+
+    num_lanes = len(lane_offsets)
+    pole_ids = [next_entity_id + i for i in range(num_lanes)]
+    next_entity_id += num_lanes
+
+    socket_positions = []
+    for lane_idx, (offset_a, offset_b) in enumerate(lane_offsets):
+        pid = pole_ids[lane_idx]
+        ra = rotate_by_quat(offset_a, (qx, qy, qz, qw))
+        rb = rotate_by_quat(offset_b, (qx, qy, qz, qw))
+        wa = (ex + ra[0], ey + ra[1], ez + ra[2])
+        wb = (ex + rb[0], ey + rb[1], ez + rb[2])
+        ctype_a = match_spline_to_socket(wa, touches)
+        ctype_b = match_spline_to_socket(wb, touches)
+        socket_positions.append((wa[0], wa[1], wa[2], ctype_a, pid))
+        socket_positions.append((wb[0], wb[1], wb[2], ctype_b, pid))
+
+    frag_str = build_socket_fragment(socket_positions)
+    return socket_positions, pole_ids, frag_str, next_entity_id
 
 
 def detect_lane_axis(positions):
@@ -548,6 +599,7 @@ def main():
     new_poles = []       # pole IDs to create
     junctions_fixed = 0
     lane3_fixed = 0
+    lane5_fixed = 0
     junctions_skipped = 0
     already_has_sockets = 0
 
@@ -564,63 +616,28 @@ def main():
 
         jtype = junction_ids[jid]
 
-        # ── DroneLane_3: needs invisible pole pairing ──
-        if jtype == "3-way":
-            # Check if already has SocketPairInvisibleConnector
-            existing_frag = None
-            for f in junction_entity.get("fragmentValues", []):
-                if isinstance(f, str) and "CrLogisticsSocketsFragment" in f:
-                    existing_frag = f
-                    break
-            if existing_frag and "SocketPairInvisibleConnector" in existing_frag:
+        # ── DroneLane_3 / DroneLane_5: needs invisible pole pairing ──
+        lane_offsets = {"3-way": DRONE_LANE_3_OFFSETS, "5-way": DRONE_LANE_5_OFFSETS}.get(jtype)
+        if lane_offsets is not None:
+            result = build_lane_sockets(junction_entity, lane_offsets, touches, next_entity_id)
+            if result is None:
                 already_has_sockets += 1
                 junctions_skipped += 1
                 continue
 
-            # Get entity transform
-            transform = junction_entity.get("spawnData", {}).get("transform", {})
-            pos = transform.get("translation", {})
-            rot = transform.get("rotation", {})
-            ex = pos.get("x", 0)
-            ey = pos.get("y", 0)
-            ez = pos.get("z", 0)
-            qx = rot.get("x", 0)
-            qy = rot.get("y", 0)
-            qz = rot.get("z", 0)
-            qw = rot.get("w", 1)
-
-            # Allocate 3 pole IDs (one per lane)
-            pole_ids = [next_entity_id, next_entity_id + 1, next_entity_id + 2]
-            next_entity_id += 3
-
-            # Build 6 socket positions (3 lanes × 2 sides)
-            socket_positions = []
-            for lane_idx, (offset_a, offset_b) in enumerate(DRONE_LANE_3_OFFSETS):
-                pid = pole_ids[lane_idx]
-
-                # Rotate offsets by entity quaternion
-                ra = rotate_by_quat(offset_a, (qx, qy, qz, qw))
-                rb = rotate_by_quat(offset_b, (qx, qy, qz, qw))
-
-                # World positions
-                wa = (ex + ra[0], ey + ra[1], ez + ra[2])
-                wb = (ex + rb[0], ey + rb[1], ez + rb[2])
-
-                # Determine ConnectionType by matching spline endpoints
-                ctype_a = match_spline_to_socket(wa, touches)
-                ctype_b = match_spline_to_socket(wb, touches)
-
-                socket_positions.append((wa[0], wa[1], wa[2], ctype_a, pid))
-                socket_positions.append((wb[0], wb[1], wb[2], ctype_b, pid))
-
-            frag_str = build_socket_fragment(socket_positions)
+            socket_positions, pole_ids, frag_str, next_entity_id = result
             new_poles.extend(pole_ids)
-            socket_writes.append((jid, junction_entity, frag_str, 6))
+            num_sockets = len(lane_offsets) * 2
+            socket_writes.append((jid, junction_entity, frag_str, num_sockets))
             junctions_fixed += 1
-            lane3_fixed += 1
+            if jtype == "3-way":
+                lane3_fixed += 1
+            else:
+                lane5_fixed += 1
 
             if args.verbose:
-                print(f"\n  DroneLane_3 {jid}: 6 sockets, 3 poles ({pole_ids})")
+                label = "DroneLane_3" if jtype == "3-way" else "DroneLane_5"
+                print(f"\n  {label} {jid}: {num_sockets} sockets, {len(pole_ids)} poles ({pole_ids})")
                 for i in range(0, len(socket_positions), 2):
                     sa, sb = socket_positions[i], socket_positions[i+1]
                     print(f"    Lane {i//2}: A({sa[3] or '-'}) B({sb[3] or '-'}) pole={sa[4]}")
@@ -668,9 +685,14 @@ def main():
     print(f"  SUMMARY")
     print(f"{'='*65}")
     print(f"  Junctions to fix: {junctions_fixed}")
-    if lane3_fixed:
-        print(f"    DroneLane_3 (with pole pairing): {lane3_fixed}")
-        print(f"    Other junction types: {junctions_fixed - lane3_fixed}")
+    if lane3_fixed or lane5_fixed:
+        if lane3_fixed:
+            print(f"    DroneLane_3 (with pole pairing): {lane3_fixed}")
+        if lane5_fixed:
+            print(f"    DroneLane_5 (with pole pairing): {lane5_fixed}")
+        other = junctions_fixed - lane3_fixed - lane5_fixed
+        if other:
+            print(f"    Other junction types: {other}")
     print(f"  Invisible poles to create: {len(new_poles)}")
     print(f"  Junctions skipped: {junctions_skipped}")
     if already_has_sockets:
