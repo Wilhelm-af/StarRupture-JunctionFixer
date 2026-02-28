@@ -46,8 +46,8 @@ def extract_id(key):
 
 def find_entity_container(data):
     if isinstance(data, dict):
-        if any(re.match(r'\(ID=\d+\)', k) for k in data.keys()) and len(data) > 100:
-            return data
+        if 'entities' in data:
+            return data['entities']
         for v in data.values():
             r = find_entity_container(v)
             if r: return r
