@@ -27,7 +27,7 @@ def read_sav(path):
 
 
 def write_sav(path, data):
-    json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    json_bytes = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode("utf-8")
     compressed = zlib.compress(json_bytes)
     with open(path, "wb") as f:
         f.write(struct.pack("<I", len(json_bytes)))
@@ -69,12 +69,12 @@ def get_spline_data(entity):
         e = re.search(r'EndEntity=\(ID=(\d+)\)', frag)
         if not s or not e:
             continue
-        positions = re.findall(r'Position=\(X=([\-\d.]+),Y=([\-\d.]+)', frag)
+        positions = re.findall(r'Position=\(X=([\-\d.]+),Y=([\-\d.]+),Z=([\-\d.]+)\)', frag)
         return {
             "start_id": int(s.group(1)),
             "end_id": int(e.group(1)),
-            "start_pos": (float(positions[0][0]), float(positions[0][1])) if positions else None,
-            "end_pos": (float(positions[-1][0]), float(positions[-1][1])) if positions else None,
+            "start_pos": (float(positions[0][0]), float(positions[0][1]), float(positions[0][2])) if positions else None,
+            "end_pos": (float(positions[-1][0]), float(positions[-1][1]), float(positions[-1][2])) if positions else None,
         }
     return None
 
@@ -93,19 +93,87 @@ def rewrite_spline_field(entity, old_id, new_id, field):
     return False
 
 
-def make_pole_entity():
+def capture_pole_template(entities):
+    """Capture a template from an existing visible drone pole entity."""
+    import copy
+    for key, value in entities.items():
+        if not isinstance(value, dict):
+            continue
+        config = get_config(value)
+        if "DroneRailSupport" not in config and "DronePole" not in config:
+            continue
+        if "fragmentValues" not in value:
+            continue
+
+        template = copy.deepcopy(value)
+
+        template["spawnData"]["entityConfigDataPath"] = (
+            "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/"
+            "DA_DroneInvisiblePole.DA_DroneInvisiblePole"
+        )
+
+        template["fragmentValues"] = [
+            frag for frag in template.get("fragmentValues", [])
+            if not isinstance(frag, str) or "CrLogisticsIntersectionFragment" not in frag
+        ]
+
+        for i, frag in enumerate(template["fragmentValues"]):
+            if isinstance(frag, str) and "AuAPMassFragment" in frag:
+                template["fragmentValues"][i] = (
+                    "/Script/AuActorPlacement.AuAPMassFragment"
+                    "(MainMeshZOffset=0.000000,SpawnServerTimeSeconds=0.000000)"
+                )
+                break
+
+        template["spawnData"]["transform"]["translation"] = {"x": 0, "y": 0, "z": 0}
+        template["spawnData"]["transform"]["rotation"] = {"x": 0, "y": 0, "z": 0, "w": 1}
+        template["spawnData"]["transform"]["scale3D"] = {"x": 1, "y": 1, "z": 1}
+        template["tags"] = []
+
+        return template
+
+    return None
+
+
+def make_pole_from_template(template, position, world_time=0.0):
+    """Create a new pole entity from a template with correct position."""
+    import copy
+    pole = copy.deepcopy(template)
+    pole["spawnData"]["transform"]["translation"] = {
+        "x": position["x"], "y": position["y"], "z": position["z"]
+    }
+
+    for i, frag in enumerate(pole["fragmentValues"]):
+        if isinstance(frag, str) and "AuAPMassFragment" in frag:
+            pole["fragmentValues"][i] = re.sub(
+                r'SpawnServerTimeSeconds=[\-\d.]+',
+                f'SpawnServerTimeSeconds={world_time:.6f}',
+                pole["fragmentValues"][i]
+            )
+            break
+
+    return pole
+
+
+def make_fallback_pole_entity(position=None, world_time=0.0):
+    """Fallback: create a minimal but Mass-Entity-valid pole entity."""
+    pos = position or {"x": 0, "y": 0, "z": 0}
     return {
         "spawnData": {
             "entityConfigDataPath": "/Game/Chimera/Buildings/DroneConnections/InvisibleConnection/DA_DroneInvisiblePole.DA_DroneInvisiblePole",
             "transform": {
                 "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
-                "translation": {"x": 0, "y": 0, "z": 0},
+                "translation": {"x": pos["x"], "y": pos["y"], "z": pos["z"]},
                 "scale3D": {"x": 1, "y": 1, "z": 1}
             }
         },
         "tags": [],
         "fragmentValues": [
-            "/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)"
+            f"/Script/AuActorPlacement.AuAPMassFragment(MainMeshZOffset=0.000000,SpawnServerTimeSeconds={world_time:.6f})",
+            "/Script/Chimera.CrMassBuildingStabilityData(Strength=0.000000,Cost=0.000000)",
+            "/Script/Chimera.CrBuildingStateFragment(bInitialized=True,bDisabled=False,MalfunctionFlags=None)",
+            "/Script/Chimera.CrElectricityFragment(ElectricityMultiplierLevel=1)",
+            "/Script/Chimera.CrMassTemperatureFragment(CurrentHeat=0.000000,Modifiers=(CalculatedValue=0.000000,Modifiers=(),bDirty=False,LastFilter=Unknown))"
         ]
     }
 
@@ -173,8 +241,74 @@ def main():
         print("  ERROR: No entity container found")
         return
 
+    # ── Dangling reference cleanup ──
+    all_eids = set()
+    for key in entities:
+        eid = extract_id(key)
+        if eid is not None:
+            all_eids.add(eid)
+
+    broken_spline_keys = []
+    for key, value in entities.items():
+        if not isinstance(value, dict):
+            continue
+        for frag in value.get("fragmentValues", []):
+            if not isinstance(frag, str) or "AuSplineConnectionFragment" not in frag:
+                continue
+            s = re.search(r'StartEntity=\(ID=(\d+)\)', frag)
+            e = re.search(r'EndEntity=\(ID=(\d+)\)', frag)
+            if s and e:
+                if int(s.group(1)) not in all_eids or int(e.group(1)) not in all_eids:
+                    broken_spline_keys.append(key)
+                    break
+
+    if broken_spline_keys:
+        print(f"  Dangling splines found: {len(broken_spline_keys)}")
+
+        removed_ids = set()
+        for key in broken_spline_keys:
+            eid = extract_id(key)
+            if eid is not None:
+                removed_ids.add(eid)
+
+        if args.apply:
+            for key in broken_spline_keys:
+                eid = extract_id(key)
+                if eid is not None:
+                    all_eids.discard(eid)
+                del entities[key]
+
+            # Clean up intersection fragments referencing removed entities
+            cleaned_intersections = 0
+            for key, value in entities.items():
+                if not isinstance(value, dict):
+                    continue
+                frags = value.get("fragmentValues", [])
+                for i, frag in enumerate(frags):
+                    if not isinstance(frag, str) or "CrLogisticsIntersectionFragment" not in frag:
+                        continue
+                    refs = [int(m.group(1)) for m in re.finditer(r'Entity=\(ID=(\d+)\)', frag)]
+                    if any(r in removed_ids for r in refs):
+                        frags[i] = "/Script/Chimera.CrLogisticsIntersectionFragment(CachedMoveSpeedPerLine=())"
+                        cleaned_intersections += 1
+
+            # Clean up electricity connectorData
+            cleaned_elec = 0
+            elec_conn = data.get("itemData", {}).get("Mass", {}).get("electricitySubsystemState", {}).get("connectorData", {})
+            if isinstance(elec_conn, dict):
+                keys_to_remove = [k for k in elec_conn if extract_id(k) in removed_ids]
+                for k in keys_to_remove:
+                    del elec_conn[k]
+                    cleaned_elec += 1
+
+            print(f"    ✓ Removed {len(broken_spline_keys)} broken splines")
+            print(f"    ✓ Cleaned {cleaned_intersections} intersection fragments")
+            print(f"    ✓ Cleaned {cleaned_elec} electricity entries")
+        else:
+            print(f"    (will be removed on --apply)")
+
     # ── Discovery ──
-    junction_ids = {}  # eid -> "3-way"/"5-way"
+    junction_ids = {}  # eid -> type string
     splines = []       # list of spline info dicts
     pole_keys = []
     drone_keys = []
@@ -189,6 +323,12 @@ def main():
             junction_ids[eid] = "3-way"
         elif "DroneLane_5" in config:
             junction_ids[eid] = "5-way"
+        elif "DroneMerger_3To1" in config:
+            junction_ids[eid] = "merger-3"
+        elif "DroneMerger_5To1" in config:
+            junction_ids[eid] = "merger-5"
+        elif "DA_DroneJunction_4" in config:
+            junction_ids[eid] = "4-way"
         if "DroneInvisiblePole" in config:
             pole_keys.append(key)
         if "RailDroneConfig" in config:
@@ -206,6 +346,15 @@ def main():
     print(f"  Splines: {len(splines)}")
     print(f"  Old poles: {len(pole_keys)}")
     print(f"  Drones: {len(drone_keys)}")
+
+    # ── Capture pole template ──
+    pole_template = capture_pole_template(entities)
+    if pole_template:
+        frag_count = len(pole_template.get("fragmentValues", []))
+        print(f"  Template: captured ({frag_count} fragments)")
+    else:
+        print("  WARNING: No template pole found, using fallback minimal entity")
+    world_time = data.get("worldTimeSeconds", 0.0)
 
     # ── Build per-junction spline index ──
     # For each junction: list of (spline_info, field, neighbor_id, pos_at_junction)
@@ -241,6 +390,11 @@ def main():
         if len(touches) < 2:
             junctions_skipped += 1
             continue
+
+        junction_entity = entities.get(f"(ID={jid})")
+        junction_z = 0.0
+        if junction_entity:
+            junction_z = junction_entity.get("spawnData", {}).get("transform", {}).get("translation", {}).get("z", 0.0)
 
         # Group by neighbor to find the lane axis
         by_neighbor = defaultdict(list)
@@ -281,7 +435,22 @@ def main():
         for lane_idx, cluster in enumerate(clusters):
             pole_id = next_id
             next_id += 1
-            new_poles[pole_id] = make_pole_entity()
+
+            # Compute pole position from cluster spline endpoints
+            cluster_positions = [item[1]["pos"] for item in cluster if item[1]["pos"]]
+            if cluster_positions:
+                avg_x = sum(p[0] for p in cluster_positions) / len(cluster_positions)
+                avg_y = sum(p[1] for p in cluster_positions) / len(cluster_positions)
+                avg_z = (sum(p[2] for p in cluster_positions) / len(cluster_positions)
+                         if len(cluster_positions[0]) >= 3 else junction_z)
+                pole_pos = {"x": avg_x, "y": avg_y, "z": avg_z}
+            else:
+                pole_pos = {"x": 0, "y": 0, "z": junction_z}
+
+            if pole_template:
+                new_poles[pole_id] = make_pole_from_template(pole_template, pole_pos, world_time)
+            else:
+                new_poles[pole_id] = make_fallback_pole_entity(pole_pos, world_time)
 
             if args.verbose:
                 sp_ids = [item[1]["spline"]["id"] for item in cluster]
