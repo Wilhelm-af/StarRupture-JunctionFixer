@@ -704,8 +704,8 @@ function extractId(key) {
 function findEntityContainer(data) {
   if (data && typeof data === 'object' && !Array.isArray(data)) {
     const keys = Object.keys(data);
-    if (keys.length > 100 && keys.some(k => /^\(ID=\d+\)$/.test(k))) {
-      return data;
+    if (Object.hasOwn(data, 'entities') && typeof data.entities === 'object') {
+      return data.entities;
     }
     for (const v of Object.values(data)) {
       const r = findEntityContainer(v);
